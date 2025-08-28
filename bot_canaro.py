@@ -8,6 +8,11 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 import xml.etree.ElementTree as ET
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
 from telegram.constants import ChatType
 import logging
 log = logging.getLogger(__name__)
@@ -242,6 +247,95 @@ async def analizar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # Precio / CoinGecko
 # =========================
+
+# --- Pega este bloque de código en tu script, por ejemplo, antes de la función "async def precio" ---
+
+PERIODO_MAP = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "180d": 180, "365d": 365}
+
+def parse_precio_args(args):
+    coin_query, vs, days = None, VS_CURRENCY_DEFAULT, 1
+    if not args:
+        return coin_query, vs, days
+    coin_query = args[0].strip().lower()
+    # Busca la divisa (vs) en cualquier posición después de la moneda
+    for arg in args[1:]:
+        if re.fullmatch(r"[a-z]{3,5}", arg.strip().lower()):
+            vs = arg.strip().lower()
+            break
+    # Busca el período (days) en cualquier posición después de la moneda
+    for arg in args[1:]:
+        if arg.strip().lower() in PERIODO_MAP:
+            days = PERIODO_MAP[arg.strip().lower()]
+            break
+    return coin_query, vs, days
+
+@lru_cache(maxsize=512)
+def _search_coingecko(query: str):
+    try:
+        r = SESSION.get("https://api.coingecko.com/api/v3/search", params={"query": query}, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log.error(f"Búsqueda CoinGecko: {e}")
+        return None
+
+def resolve_coin_id(coin_query: str) -> str | None:
+    if not coin_query:
+        return None
+    q = coin_query.lower().strip()
+    aliases = {
+        "pi": "pi-network", "pi-network": "pi-network", "pinetwork": "pi-network",
+        "btc": "bitcoin", "eth": "ethereum", "sol": "solana", "ada": "cardano",
+        "xrp": "ripple", "doge": "dogecoin", "matic": "polygon"
+    }
+    if q in aliases:
+        return aliases[q]
+    data = _search_coingecko(q)
+    if not data or "coins" not in data:
+        return None
+    coins = data["coins"]
+    # Búsqueda por símbolo, id y nombre para mayor precisión
+    for c in coins:
+        if c.get("symbol", "").lower() == q: return c.get("id")
+    for c in coins:
+        if c.get("id", "").lower() == q: return c.get("id")
+    for c in coins:
+        if c.get("name", "").lower() == q: return c.get("id")
+    return coins[0].get("id") if coins else None
+
+def fetch_coin_detail(coin_id: str):
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}"
+    params = {"localization": "false", "tickers": "false", "market_data": "true",
+              "community_data": "false", "developer_data": "false", "sparkline": "false"}
+    r = SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
+    return r.json()
+
+def fetch_market_chart(coin_id: str, vs: str, days: int):
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    params = {"vs_currency": vs, "days": str(days)}
+    r = SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
+    return r.json()
+
+def plot_chart(times, values, title: str, vs_currency: str):
+    plt.figure(figsize=(8, 4))
+    plt.plot(times, values, linewidth=2)
+    plt.title(title, fontsize=14)
+    plt.xlabel("Fecha/Hora", fontsize=10)
+    plt.ylabel(f"Precio ({vs_currency.upper()})", fontsize=10)
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.tight_layout()
+    if (times[-1] - times[0]).days >= 1:
+        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%d-%m'))
+    else:
+        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    buf = BytesIO()
+    plt.savefig(buf, format="png")
+    buf.seek(0)
+    plt.close()
+    return buf
+
 PERIODO_MAP = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "180d": 180, "365d": 365}
 
 def parse_precio_args(args):
@@ -304,66 +398,115 @@ def fetch_market_chart(coin_id: str, vs: str, days: int):
     return r.json()
 
 async def precio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f">>> COMANDO RECIBIDO: /precio del usuario {update.effective_user.id} con args: {context.args}")
+    user = update.effective_user
+    chat = update.effective_chat
+    user_id = user.id
+    es_admin = False
 
-    CMC_API_KEY = os.environ.get("CMC_API_KEY")
-    if not CMC_API_KEY:
-        await update.message.reply_text("❌ La clave de API de CoinMarketCap no está configurada.")
+    # La comprobación de admin solo funciona en grupos
+    if chat.type != 'private':
+        try:
+            admins = await context.bot.get_chat_administrators(chat.id)
+            es_admin = user_id in [a.user.id for a in admins]
+        except Exception as e:
+            log.warning(f"No se pudo obtener admins en el chat {chat.id}: {e}")
+
+    coin_query, vs, days = parse_precio_args(context.args)
+    if not coin_query:
+        await update.message.reply_text(
+            escape_md("Uso: `/precio <moneda> [divisa] [periodo]` p.ej. `/precio btc eur 7d`"),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
         return
 
-    if not context.args:
-        await update.message.reply_text("Uso: `/precio <símbolo>` (ej: `/precio btc`)", parse_mode=ParseMode.MARKDOWN_V2)
+    coin_id = resolve_coin_id(coin_query)
+    if not coin_id:
+        await update.message.reply_text(escape_md(f"❌ No se encontró la moneda: {coin_query}"), parse_mode=ParseMode.MARKDOWN_V2)
         return
 
-    symbol = context.args[0].upper()
-
-    url = 'https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest'
-    headers = {
-        'Accepts': 'application/json',
-        'X-CMC_PRO_API_KEY': CMC_API_KEY,
-    }
-    params = {
-        'symbol': symbol,
-        'convert': 'EUR' # Puedes cambiar 'EUR' por 'USD' o la divisa que prefieras
-    }
+    # Rate-limit por chat+moneda (admins exentos)
+    if not es_admin:
+        ahora = datetime.now(timezone.utc)
+        if chat.id in ultimo_precio and coin_id in ultimo_precio[chat.id]:
+            t_prev = ultimo_precio[chat.id][coin_id]["hora"]
+            if t_prev and (ahora - t_prev) < timedelta(minutes=PRICE_RATE_LIMIT_MINUTES):
+                mid = ultimo_precio[chat.id][coin_id].get("mensaje_id")
+                try:
+                    texto = (
+                        "⚠️ *Consulta limitada*\n\n"
+                        f"Solo 1 consulta por hora para *cada* criptomoneda\\.\n"
+                        f"Vuelve a intentarlo más tarde o revisa la última respuesta\\."
+                    )
+                    await update.message.reply_text(texto, parse_mode=ParseMode.MARKDOWN_V2, reply_to_message_id=mid if mid else None)
+                except Exception:
+                    await update.message.reply_text(
+                        escape_md(f"⚠️ Esta moneda tiene rate-limit de {PRICE_RATE_LIMIT_MINUTES} minutos por chat."),
+                        parse_mode=ParseMode.MARKDOWN_V2
+                    )
+                return
 
     try:
-        print(f">>> PRECIO (CMC): Buscando datos para {symbol}...")
-        r = SESSION.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
-        r.raise_for_status() # Lanza un error si la petición falla (ej: 4xx, 5xx)
-        data = r.json()
+        detail = fetch_coin_detail(coin_id)
+        if "market_data" not in detail:
+            raise ValueError("Sin market_data.")
 
-        if not data['data'] or symbol not in data['data']:
-            await update.message.reply_text(f"❌ No se encontró la moneda con el símbolo: {symbol}")
-            return
+        market = detail["market_data"]
+        def get_in_vs(field, default=0.0):
+            return market.get(field, {}).get(vs, default)
 
-        coin_data = data['data'][symbol]
-        quote = coin_data['quote']['EUR']
+        price = get_in_vs("current_price")
+        market_cap = get_in_vs("market_cap")
+        volume_24h = get_in_vs("total_volume")
+        change_24h = market.get("price_change_percentage_24h", 0.0)
+        high_24h = get_in_vs("high_24h")
+        low_24h = get_in_vs("low_24h")
+        ath = get_in_vs("ath")
+        atl = get_in_vs("atl")
 
-        name = coin_data.get('name', 'N/A')
-        price = quote.get('price', 0)
-        market_cap = quote.get('market_cap', 0)
-        volume_24h = quote.get('volume_24h', 0)
-        change_24h = quote.get('percent_change_24h', 0)
-
+        name = (detail.get("name") or coin_id).upper()
+        symbol = (detail.get("symbol") or "").upper()
+        homepage = (detail.get("links", {}).get("homepage") or [""])[0] or f"https://www.coingecko.com/en/coins/{coin_id}"
         tendencia = "📈" if (change_24h or 0) >= 0 else "📉"
-        vs_upper = "EUR"
 
+        chart = fetch_market_chart(coin_id, vs, days)
+        prices = chart.get("prices", [])
+        if not prices:
+            raise ValueError("Sin datos de gráfico.")
+        
+        times = [datetime.fromtimestamp(p[0] / 1000, tz=timezone.utc) for p in prices]
+        values = [p[1] for p in prices]
+        titulo = f"{name} ({symbol}) - Últimos {days} días" if days > 1 else f"{name} ({symbol}) - Últimas 24h"
+        
+        buffer = plot_chart(times, values, titulo, vs)
+
+        vs_upper = vs.upper()
         mensaje = (
             f"*💰 Precio de {escape_md(name)} \\({escape_md(symbol)}\\)*\n\n"
-            + f"• *Precio actual:* {escape_md(f'{price:,.6f}')} {vs_upper} {tendencia}\n"
-            + f"• *Cambio 24h:* {escape_md(f'{change_24h:.2f}')}\\%\n"
-            + f"• *Market Cap:* {escape_md(f'{market_cap:,.0f}')} {vs_upper}\n"
-            + f"• *Volumen \\(24h\\):* {escape_md(f'{volume_24h:,.0f}')} {vs_upper}\n"
+            + f"• *Precio actual:* {escape_md(f'{price:,.6f}')} {escape_md(vs_upper)} {tendencia}\n"
+            + f"• *Market Cap:* {escape_md(f'{market_cap:,.0f}')} {escape_md(vs_upper)}\n"
+            + f"• *Volumen \\(24h\\):* {escape_md(f'{volume_24h:,.0f}')} {escape_md(vs_upper)}\n"
+            + f"• *Cambio 24h:* {escape_md(f'{(change_24h or 0):.2f}')}\\%\n"
+            + f"• *Máx 24h:* {escape_md(f'{high_24h:,.6f}')} {escape_md(vs_upper)}\n"
+            + f"• *Mín 24h:* {escape_md(f'{low_24h:,.6f}')} {escape_md(vs_upper)}\n"
+            + f"• *ATH:* {escape_md(f'{ath:,.6f}')} {escape_md(vs_upper)}\n"
+            + f"• *ATL:* {escape_md(f'{atl:,.6f}')} {escape_md(vs_upper)}\n\n"
+            + f"🌐 *Más info:* [{escape_md(name)}]({escape_md(homepage)})"
         )
 
-        print(">>> PRECIO (CMC): Enviando respuesta...")
-        await update.message.reply_text(mensaje, parse_mode=ParseMode.MARKDOWN_V2)
+        sent = await update.message.reply_photo(photo=buffer, caption=mensaje, parse_mode=ParseMode.MARKDOWN_V2)
+
+        if not es_admin and chat.type != 'private':
+            ultimo_precio.setdefault(chat.id, {})[coin_id] = {
+                "hora": datetime.now(timezone.utc),
+                "mensaje_id": sent.message_id
+            }
 
     except Exception as e:
-        print(f"!!!!!!!! ERROR EN PRECIO (CMC): {e}")
-        log.error(f"Precio CMC error: {e}")
-        await update.message.reply_text("❌ No se pudo obtener la información. Verifica el símbolo o inténtalo más tarde.")
+        log.error(f"Precio error: {e}")
+        await update.message.reply_text(
+            escape_md("❌ No se pudo obtener la información solicitada. Prueba con otro símbolo/nombre o más tarde."),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
 
 # =========================
 # Noticias por RSS (CoinDesk, Cointelegraph, etc.)
