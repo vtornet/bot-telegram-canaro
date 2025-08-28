@@ -39,11 +39,13 @@ PRICE_RATE_LIMIT_MINUTES = int(os.environ.get("PRICE_RATE_LIMIT_MINUTES", "60"))
 
 # Feeds RSS para /noticias (separados por coma). Por defecto CoinDesk y Cointelegraph (fuentes oficiales).
 # Puedes añadir más, p. ej.: https://cryptoslate.com/feed/, https://cryptonews.com/news/feed/
-NEWS_RSS_FEEDS = os.environ.get(
+# Feeds RSS para /noticias (separados por coma).
+NEWS_RSS_FEEDS_RAW = os.environ.get(
     "NEWS_RSS_FEEDS",
-    "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml,https://cointelegraph.com/rss"
-).split(",")
-
+    "'https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml,https://cointelegraph.com/rss'"
+)
+# Limpiamos las comillas que necesita Railway y separamos por coma
+NEWS_RSS_FEEDS = [url.strip().strip("'") for url in NEWS_RSS_FEEDS_RAW.split(',')]
 NEWS_MAX_ITEMS = int(os.environ.get("NEWS_MAX_ITEMS", "10"))  # nº máximo de ítems a mostrar
 
 # HTTP
