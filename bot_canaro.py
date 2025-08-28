@@ -245,19 +245,7 @@ async def analizar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 log.warning(f"No se pudo borrar spam: {e}")
             return
-        
-async def es_admin_en_chat(context, chat, user_id) -> bool:
-    # En chats privados no hay admins; no consultes la API
-    if chat.type == ChatType.PRIVATE:
-        return False
-    try:
-        admins = await context.bot.get_chat_administrators(chat.id)
-        return user_id in [a.user.id for a in admins]
-    except Exception as e:
-        # Si falla (400, etc.), tratamos como no-admin y seguimos
-        log.warning(f"get_chat_administrators falló en {chat.id}: {e}")
-        return False
-        
+
 # =========================
 # Precio / CoinGecko
 # =========================
@@ -346,9 +334,7 @@ async def precio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
 
     admins = await context.bot.get_chat_administrators(chat_id)
-    chat = update.effective_chat
-    user_id = update.effective_user.id
-    es_admin = await es_admin_en_chat(context, chat, user_id)
+    es_admin = user_id in [a.user.id for a in admins]
 
     # Parse args obligatorios en este bot general
     coin_query, vs, days = parse_precio_args(context.args)
@@ -520,9 +506,6 @@ async def noticias(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"• <a href=\"{link}\">{title}</a>")
     html = "\n".join(lines)
     await update.message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
-    
-async def on_error(update, context):
-    log.exception("Excepción no controlada en update", exc_info=context.error)
 
 # =========================
 # App
@@ -540,9 +523,7 @@ def main():
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, dar_bienvenida))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), analizar_mensaje))
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, controlar_envio_multimedia))
-    app.add_error_handler(on_error)
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.run_polling()
 
 if __name__ == "__main__":
