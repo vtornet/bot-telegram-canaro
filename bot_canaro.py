@@ -8,11 +8,6 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 import xml.etree.ElementTree as ET
 
-# Matplotlib para gráfico de precios
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 from telegram.constants import ChatType
 import logging
 log = logging.getLogger(__name__)
@@ -307,26 +302,6 @@ def fetch_market_chart(coin_id: str, vs: str, days: int):
     r = SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     return r.json()
-
-def plot_chart(times, values, title: str):
-    plt.figure(figsize=(8, 4))
-    plt.plot(times, values, linewidth=2)
-    plt.title(title, fontsize=14)
-    plt.xlabel("Fecha/Hora", fontsize=10)
-    plt.ylabel("Precio", fontsize=10)
-    plt.grid(True, linestyle="--", alpha=0.5)
-    plt.tight_layout()
-    if (times[-1] - times[0]).days >= 1:
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%d-%m'))
-    else:
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-    buf = BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-    plt.close()
-    return buf
-
-# (Asegúrate de tener "import os" y "import logging" al principio de tu archivo)
 
 async def precio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f">>> COMANDO RECIBIDO: /precio del usuario {update.effective_user.id} con args: {context.args}")
