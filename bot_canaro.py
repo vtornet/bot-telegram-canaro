@@ -100,6 +100,8 @@ patrones_spam = [
     r"retira\s+tu\s+bono",
     r"@criptoppumps", r"criptoppumps",
     r"trumpdropwalletbot",
+    r"@criptoexplo",
+    r"criptoexplo",
 ]
 
 # =========================
